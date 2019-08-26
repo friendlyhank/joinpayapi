@@ -20,7 +20,8 @@ func TestJoinPayMakeOrder(t *testing.T) {
 	orderno := "103409782611613087"
 	body := "商城商品"
 	producetname := "雪梨子"
-	JoinPayMakeOrder(user, body, orderno, producetname, 1, key)
+	joinPayMakeOrderRes, _ := JoinPayMakeOrder(user, body, orderno, producetname, 1, key)
+	fmt.Println(joinPayMakeOrderRes)
 }
 
 //订单支付测试

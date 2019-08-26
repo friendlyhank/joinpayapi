@@ -6,13 +6,16 @@ import (
 	"net/url"
 	"time"
 
+	"git.biezao.com/ant/xmiss/foundation/cache"
+
+	"git.biezao.com/ant/xmiss/foundation/uniqueid"
 	"git.biezao.com/ant/xmiss/foundation/util/str"
 	"git.biezao.com/ant/xmiss/foundation/vars"
 
+	"git.biezao.com/ant/xmiss/externalapi/wxapi"
 	"git.biezao.com/ant/xmiss/foundation/db"
 	xhttp "git.biezao.com/ant/xmiss/foundation/http"
 	"git.biezao.com/ant/xmiss/foundation/profile"
-	"git.biezao.com/ant/xmiss/foundation/wxapi"
 	"github.com/astaxie/beego/logs"
 )
 
@@ -30,9 +33,6 @@ var (
 	ErrOrderPaid = errors.New("订单已支付")
 )
 
-/*
- *订单支付结构体
- */
 type JoinPayMakeOrderReq struct {
 	Version          string `json:"p0_Version"`
 	MerchantNo       string `json:"p1_MerchantNo"`       //商户编号
@@ -75,38 +75,13 @@ type JoinPayMakeOrderRes struct {
 	TrxNo            string `json:"r7_TrxNo"`
 	MerchantBankCode string `json:"r8_MerchantBankCode"`
 	SubMerchantNo    string `json:"r9_SubMerchantNo"`
-	Code             int64  `json:"ra_Code"`
+	Code             int32  `json:"ra_Code"`
 	CodeMsg          string `json:"rb_CodeMsg"`
 	Result           string `json:"rc_Result"`
 	Pic              string `json:"rd_Pic"`
 	Hmac             string `json:"hmac"`
 }
 
-type JoinPayQueryOrderReq struct{
-	MerchantNo       string `json:"p1_MerchantNo"`       //商户编号
-	OrderNo          string `json:"p2_OrderNo"`          //订单编号
-	Hmac             string `json:"hmac"`
-}
-
-type JoinPayQueryOrderRes struct{
-	MerchantNo       string `json:"r1_MerchantNo"`       //商户编号
-	OrderNo          string `json:"r2_OrderNo"`          //订单编号
-	Amount             string `json:"r3_Amount"`
-	ProductName             string `json:"r4_ProductName"`
-	TrxNo             string `json:"r5_TrxNo"`
-	BankTrxNo             string `json:"r6_BankTrxNo"`
-	Status       string `json:"ra_Status"`       //商户编号
-	Code          string `json:"rb_Code"`          //订单编号
-	CodeMsg             string `json:"rc_CodeMsg"`
-	OpenId             string `json:"rd_OpenId"`
-	DiscountAmount             string `json:"re_DiscountAmount"`
-	PayTime             string `json:"rf_PayTime"`
-	Hmac             string `json:"hmac"`
-}
-
-/*
- *订单退款结构体
- */
 type JoinPayRefundToUserReq struct {
 }
 
@@ -141,9 +116,6 @@ type JoinPaySingleRePayReq struct {
 	Hmac                  string `json:"hmac"`
 }
 
-/*
- *代付订单请求
- */
 type JoinPaySingleRePayData struct {
 	ErrorCode       string `json:"errorCode"`
 	ErrorDesc       string `json:"errorDesc"`
@@ -153,14 +125,13 @@ type JoinPaySingleRePayData struct {
 }
 
 type JoinPaySingleRePayRes struct {
-	StatusCode int64                  `json:"statusCode"`
+	StatusCode int32                  `json:"statusCode"`
 	Message    string                 `json:"message"`
 	Data       JoinPaySingleRePayData `json:"data"`
 }
 
 // JoinPayMakeOrder -汇聚订单支付订单
 func JoinPayMakeOrder(user *db.User, body, orderno, productname string, amount int64, key *db.Key) (joinPayMakeOrderRes *JoinPayMakeOrderRes, err error) {
-
 	defer profile.TimeTrack(time.Now(), "[JoinPay-API] JoinPayMakeOrder")
 
 	if amount <= 0 {
@@ -180,15 +151,15 @@ func JoinPayMakeOrder(user *db.User, body, orderno, productname string, amount i
 
 	values := &url.Values{}
 	values.Add("p0_Version", "1.0")
-	values.Add("p1_MerchantNo", "888106400003294")
+	values.Add("p1_MerchantNo", env.Mchid)
 	values.Add("p2_OrderNo", orderno)
 	values.Add("p3_Amount", str.GetMoneyYuan(amount))
 	values.Add("p4_Cur", "1")
 	values.Add("p5_ProductName", productname)
 	values.Add("p6_ProductDesc", body)
 	values.Add("p7_Mp", "")
-	values.Add("p8_ReturnUrl", "https://xmiss.yunlaimi.com/joinpaynotify")
-	values.Add("p9_NotifyUrl", "https://xmiss.yunlaimi.com/joinpaynotify")
+	values.Add("p8_ReturnUrl", env.NotifyURL)
+	values.Add("p9_NotifyUrl", env.NotifyURL)
 	values.Add("q1_FrpCode", "WEIXIN_XCX") //WEIXIN_GZH公众号 WEIXIN_XCX 小程序支付
 	values.Add("q2_MerchantBankCode", "")
 	values.Add("q3_SubMerchantNo", "")
@@ -204,11 +175,10 @@ func JoinPayMakeOrder(user *db.User, body, orderno, productname string, amount i
 	}
 
 	sign := &Sign{Values: values}
-	values.Add("hmac", sign.Sign("3a6782eff2b14f81b76315b8781c705d", slicekey, "Md5"))
+	values.Add("hmac", sign.Sign(env.APIKey, slicekey, "Md5"))
 
 	joinPayMakeOrderRes = &JoinPayMakeOrderRes{}
 	err = xhttp.PostJSON(UNI_PAY_URL, values, nil, joinPayMakeOrderRes)
-	fmt.Println(joinPayMakeOrderRes)
 	if err != nil {
 		logs.Error("|JoinApi|joinapipay|JoinPayMakeOrder|%v", err)
 		joinPayMakeOrderRes = nil
@@ -217,43 +187,42 @@ func JoinPayMakeOrder(user *db.User, body, orderno, productname string, amount i
 	return
 }
 
-//支付订单查询
-func JoinPayOrderQuery()(joinPayQueryOrderRes *JoinPayQueryOrderRes,err error){
-	defer profile.TimeTrack(time.Now(), "[JoinPay-API] JoinPayOrderQuery")
-
-	var slicekey = []string{"p1_MerchantNo", "p2_OrderNo", "p3_RefundOrderNo", "p4_RefundAmount", "p5_RefundReason", "p6_NotifyUrl", "hmac"}
-
-	values := &url.Values{}
-	values.Add("p1_MerchantNo", "")
-	values.Add("p2_OrderNo", "")
-	sign := &Sign{Values: values}
-	values.Add("hmac", sign.Sign("3a6782eff2b14f81b76315b8781c705d", slicekey, "Md5"))
-
-	joinPayQueryOrderRes = &JoinPayQueryOrderRes{}
-	err = xhttp.PostJSON(REFUND_URL, values, nil, joinPayQueryOrderRes)
-
-	if err != nil {
-		logs.Error("|JoinApi|joinapipay|JoinPayRefundToUser|%v", err)
-		joinPayQueryOrderRes = nil
-	}
-	return
-}
-
 //JoinPayRefundToUser -汇聚支付订单退款
-func JoinPayRefundToUser() (joinPayRefundToUserRes *JoinPayRefundToUserRes, err error) {
+func JoinPayRefundToUser(order *db.Order, refundno string, amount int64, remark string) (joinPayRefundToUserRes *JoinPayRefundToUserRes, err error) {
 	defer profile.TimeTrack(time.Now(), "[JoinPay-API] JoinPayRefundToUser")
 
+	var (
+		key *db.Key
+	)
+
+	if amount <= 0 {
+		err = errors.New("支付的金额有误")
+		return
+	}
+
+	// 查询个人退款接口请求参数
+	if key, err = cache.GetKey(order.Kid); err != nil || key == nil {
+		return nil, fmt.Errorf("支付失败：%v", "key不存在")
+	}
+
+	// 获取支付环境
+	env := wxapi.GetPayEnv(key)
+	if env == nil {
+		err = fmt.Errorf("kid:%v,keyname:%v,获取支付环境失败", key.Kid, key.Name)
+		return
+	}
+
 	var slicekey = []string{"p1_MerchantNo", "p2_OrderNo", "p3_RefundOrderNo", "p4_RefundAmount", "p5_RefundReason", "p6_NotifyUrl", "hmac"}
 
 	values := &url.Values{}
-	values.Add("p1_MerchantNo", "")
-	values.Add("p2_OrderNo", "")
-	values.Add("p3_RefundOrderNo", "102770406839238651")
-	values.Add("p4_RefundAmount", "0.01")
-	values.Add("p5_RefundReason", "1")
-	values.Add("p6_NotifyUrl", "雪梨子")
+	values.Add("p1_MerchantNo", env.Mchid)
+	values.Add("p2_OrderNo", order.Orderno)
+	values.Add("p3_RefundOrderNo", refundno)
+	values.Add("p4_RefundAmount", str.GetMoneyYuan(amount))
+	values.Add("p5_RefundReason", remark)
+	values.Add("p6_NotifyUrl", env.NotifyURL)
 	sign := &Sign{Values: values}
-	values.Add("hmac", sign.Sign("3a6782eff2b14f81b76315b8781c705d", slicekey, "Md5"))
+	values.Add("hmac", sign.Sign(env.APIKey, slicekey, "Md5"))
 
 	joinPayRefundToUserRes = &JoinPayRefundToUserRes{}
 	err = xhttp.PostJSON(REFUND_URL, values, nil, joinPayRefundToUserRes)
@@ -266,31 +235,47 @@ func JoinPayRefundToUser() (joinPayRefundToUserRes *JoinPayRefundToUserRes, err 
 }
 
 //JoinPaySingleRePay -单笔代付金额
-func JoinPaySingleRePay() (joinPaySingleRePayRes *JoinPaySingleRePayRes, err error) {
-
+func JoinPaySingleRePay(uid int64, receiverAccountNoEnc string, receiverNameEnc string, amount int64, remark string, key *db.Key) (joinPaySingleRePayRes *JoinPaySingleRePayRes, err error) {
 	defer profile.TimeTrack(time.Now(), "[JoinPay-API] JoinPaySingleRePay")
+
+	if amount <= 0 {
+		err = errors.New("支付的金额有误")
+		return
+	}
+
+	// 获取支付环境
+	env := wxapi.GetPayEnv(key)
+	if env == nil {
+		err = fmt.Errorf("kid:%v,keyname:%v,获取支付环境失败", key.Kid, key.Name)
+		return
+	}
 
 	var slicekey = []string{"UserNo", "ProductCode", "RequestTime", "MerchantOrderNo", "ReceiverAccountNoEnc", "ReceiverNameEnc", "ReceiverAccountType", "ReceiverBankChannelNo",
 		"PaidAmount", "Currency", "IsChecked", "PaidDesc", "PaidUse", "CallbackUrl", "FirstProductCode", "hmac"}
 
 	values := &url.Values{}
-	values.Add("UserNo", "888106400003294")
-	values.Add("ProductCode", "BANK_PAY_ORDINARY_ORDER")
-	values.Add("RequestTime", "2019-08-07 14:14:33")
-	values.Add("MerchantOrderNo", "102446425429691356")
-	values.Add("ReceiverAccountNoEnc", "6214832018173547")
-	values.Add("ReceiverNameEnc", "Hank")
+	values.Add("UserNo", env.Mchid)
+	values.Add("ProductCode", "BANK_PAY_DAILY_ORDER") //朝夕付 BANK_PAY_DAILY_ORDER  BANK_PAY_MAT_ENDOWMENT_ORDER 任意付
+	values.Add("RequestTime", time.Now().Format("2006-01-02 15:04:05"))
+	values.Add("MerchantOrderNo", uniqueid.GenerateOrderRefundNo(uid))
+	values.Add("ReceiverAccountNoEnc", receiverAccountNoEnc) //银行卡号
+	values.Add("ReceiverNameEnc", receiverNameEnc)
 	values.Add("ReceiverAccountType", "201")
 	//values.Add("ReceiverBankChannelNo", "")
-	values.Add("PaidAmount", "0.01")
+	values.Add("PaidAmount", str.GetMoneyYuan(amount))
 	values.Add("Currency", "201")
 	values.Add("IsChecked", "202") //是否复核 201复核 202不复核
-	values.Add("PaidDesc", "测试")
+	values.Add("PaidDesc", remark)
 	values.Add("PaidUse", "201")
-	values.Add("CallbackUrl", "https://xmiss.yunlaimi.com/wxpaynotify")
+	values.Add("CallbackUrl", env.NotifyURL)
 	values.Add("FirstProductCode", "BANK_PAY_DAILY_ORDER")
+
+	if !vars.IsProd() { // 开发环境 , 测试环境
+		values.Set("PaidAmount", "0.01")
+	}
+
 	sign := &Sign{Values: values}
-	values.Add("hmac", sign.Sign("3a6782eff2b14f81b76315b8781c705d", slicekey, "Md5"))
+	values.Add("hmac", sign.Sign(env.APIKey, slicekey, "Md5"))
 
 	joinPaySingleRePayReq := &JoinPaySingleRePayReq{
 		UserNo:                values.Get("UserNo"),
